@@ -4,6 +4,9 @@
       "App\\": "src/"
     }
   },
+  "require": {
+    "php": ">=8.0",
+  },
   "require-dev": {
     "squizlabs/php_codesniffer": "^3.7",
     "slevomat/coding-standard": "^8.8"
