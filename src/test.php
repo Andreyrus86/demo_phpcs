@@ -1,13 +1,24 @@
 <?php
 
 declare(strict_types=1);
+
 namespace App;
 
 class JSONDB
 {
+    public const ASC = 1;
+
+    public const DESC = 0;
+
+    public const AND = 'AND';
+
+    public const OR = 'OR';
+
     public $file;
 
     public $content = [];
+
+    protected $dir;
 
     private $fp;
 
@@ -27,17 +38,7 @@ class JSONDB
 
     private $order_by = [];
 
-    protected $dir;
-
     private $json_opts = [];
-
-    public const ASC = 1;
-
-    public const DESC = 0;
-
-    public const AND = 'AND';
-
-    public const OR = 'OR';
 
     public function __construct($dir, $json_encode_opt = JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
     {
@@ -45,13 +46,15 @@ class JSONDB
         $this->json_opts['encode'] = $json_encode_opt;
     }
 
-    public function check_fp_size() {
+    public function check_fp_size()
+    {
         $size = 0;
-        $cur_size = 0;;
+        $cur_size = 0;
+
 
         if ($this->fp) {
             $cur_size = ftell($this->fp);
-            if ($cur_size == 0) {
+            if ($cur_size === 0) {
                 echo 1;
             }
             fseek($this->fp, 0, SEEK_END);
@@ -62,66 +65,8 @@ class JSONDB
         return $size;
     }
 
-    private function check_file()
+    public function select($args = '*')
     {
-        /**
-         * Checks and validates if JSON file exists
-         *
-         * @return bool
-         */
-
-        // Checks if DIR exists, if not create
-        if (! is_dir($this->dir)) {
-            mkdir($this->dir, 0700);
-        }
-        // Checks if JSON file exists, if not create
-        if (! file_exists($this->file)) {
-            touch($this->file);
-            // $this->commit();
-        }
-
-        if ($this->load == 'partial') {
-            $this->fp = fopen($this->file, 'r+');
-            if (! $this->fp) {
-                throw new \Exception('Unable to open json file');
-            }
-
-            $size = $this->check_fp_size();
-            if ($size) {
-                $content = get_json_chunk($this->fp);
-
-                // We could not get the first chunk of JSON. Lets try to load everything then
-                if (! $content) {
-                    $content = fread($this->fp, $size);
-                } else {
-                    // We got the first chunk, we still need to put it into an array
-                    $content = sprintf('[%s]', $content);
-                }
-
-                $content = json_decode($content, true);
-            } else {
-                // Empty file. File was just created
-                $content = [];
-            }
-        } else {
-            // Read content of JSON file
-            $content = file_get_contents($this->file);
-            $content = json_decode($content, true);
-        }
-
-        // Check if its arrays of jSON
-        if (! is_array($content) && is_object($content)) {
-            throw new \Exception('An array of json is required: Json data enclosed with []');
-        }
-        // An invalid jSON file
-        if (! is_array($content) && ! is_object($content)) {
-            throw new \Exception('json is invalid');
-        }
-        $this->content = $content;
-        return true;
-    }
-
-    public function select($args = '*') {
         /**
          * Explodes the selected columns into array
          *
@@ -174,8 +119,8 @@ class JSONDB
     /**
      * Implements regex search on where statement.
      *
-     * @param	string	$pattern			Regex pattern
-     * @param	int		$preg_match_flags	Flags for preg_grep(). See - https://www.php.net/manual/en/function.preg-match.php
+     * @param   string  $pattern            Regex pattern
+     * @param   int     $preg_match_flags   Flags for preg_grep(). See - https://www.php.net/manual/en/function.preg-match.php
      */
     public static function regex(string $pattern, int $preg_match_flags = 0): object
     {
@@ -260,6 +205,207 @@ class JSONDB
         fclose($f);
     }
 
+    /**
+     * Prepares data and written to file
+     *
+     * @return object $this
+     */
+    public function trigger()
+    {
+        $content = (! empty($this->where) ? $this->where_result() : $this->content);
+        $return = false;
+        if ($this->delete) {
+            if (! empty($this->last_indexes) && ! empty($this->where)) {
+                $this->content = array_filter($this->content, function ($index) {
+                    return ! in_array($index, $this->last_indexes);
+                }, ARRAY_FILTER_USE_KEY);
+
+                $this->content = array_values($this->content);
+            } elseif (empty($this->where) && empty($this->last_indexes)) {
+                $this->content = [];
+            }
+
+            $return = true;
+            $this->delete = false;
+        } elseif (! empty($this->update)) {
+            $this->_update();
+            $this->update = [];
+        } else {
+            $return = false;
+        }
+        $this->commit();
+        return $this;
+    }
+
+    public function to_xml($from, $to)
+    {
+        $this->from($from);
+        if ($this->content) {
+            $element = pathinfo($from, PATHINFO_FILENAME);
+            $xml = '
+            <?xml version="1.0"?>
+                <' . $element . '>
+';
+
+            foreach ($this->content as $index => $value) {
+                $xml .= '
+                <DATA>';
+                foreach ($value as $col => $val) {
+                    $xml .= sprintf('
+                    <%s>%s</%s>', $col, $val, $col);
+                }
+                $xml .= '
+                </DATA>
+                ';
+            }
+            $xml .= '</' . $element . '>';
+
+            $xml = trim($xml);
+            file_put_contents($to, $xml);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Generates SQL from JSON
+     *
+     * @param   string  $from           JSON file to get data from
+     * @param   string  $to             Filename to write SQL into
+     * @param   bool    $create_table   If to include create table in this export
+     *
+     * @return  bool    Returns true if file was created, else false
+     */
+    public function to_mysql(string $from, string $to, bool $create_table = true): bool
+    {
+        $this->from($from); // Reads the JSON file
+        if ($this->content) {
+            $table = pathinfo($to, PATHINFO_FILENAME); // Get filename to use as table
+
+            $sql = "-- PHP-JSONDB JSON to MySQL Dump\n--\n\n";
+            if ($create_table) {
+                // Should create table, generate a CREATE TABLE statement using the column of the first row
+                $first_row = (array) $this->content[0];
+                $columns = array_map(function ($column) use ($first_row) {
+                    return sprintf("\t`%s` %s", $column, $this->_to_mysql_type(gettype($first_row[$column])));
+                }, array_keys($first_row));
+
+                $sql = sprintf("%s-- Table Structure for `%s`\n--\n\nCREATE TABLE `%s` \n(\n%s\n);\n", $sql, $table, $table, implode(",\n", $columns));
+            }
+
+            foreach ($this->content as $row) {
+                $row = (array) $row;
+                $values = array_map(function ($vv) {
+                    $vv = (is_array($vv) || is_object($vv) ? serialize($vv) : $vv);
+                    return sprintf("'%s'", addslashes((string) $vv));
+                }, array_values($row));
+
+                $cols = array_map(function ($col) {
+                    return sprintf('`%s`', $col);
+                }, array_keys($row));
+                $sql .= sprintf("INSERT INTO `%s` ( %s ) VALUES ( %s );\n", $table, implode(', ', $cols), implode(', ', $values));
+            }
+            file_put_contents($to, $sql);
+            return true;
+        }
+        return false;
+    }
+
+    public function order_by($column, $order = self::ASC)
+    {
+        $this->order_by = [$column, $order];
+        return $this;
+    }
+
+    public function get()
+    {
+        if ($this->where !== null) {
+            $content = $this->where_result();
+        } else {
+            $content = $this->content;
+        }
+
+        if ($this->select && ! in_array('*', $this->select)) {
+            $r = [];
+            foreach ($content as $id => $row) {
+                $row = (array) $row;
+                foreach ($row as $key => $val) {
+                    if (in_array($key, $this->select)) {
+                        $r[$id][$key] = $val;
+                    } else {
+                        continue;
+                    }
+                }
+            }
+            $content = $r;
+        }
+
+        // Finally, lets do sorting :)
+        $content = $this->_process_order_by($content);
+
+        $this->flush_indexes(true);
+        return $content;
+    }
+
+    private function check_file()
+    {
+        /**
+         * Checks and validates if JSON file exists
+         *
+         * @return bool
+         */
+
+        // Checks if DIR exists, if not create
+        if (! is_dir($this->dir)) {
+            mkdir($this->dir, 0700);
+        }
+        // Checks if JSON file exists, if not create
+        if (! file_exists($this->file)) {
+            touch($this->file);
+            // $this->commit();
+        }
+
+        if ($this->load === 'partial') {
+            $this->fp = fopen($this->file, 'r+');
+            if (! $this->fp) {
+                throw new \Exception('Unable to open json file');
+            }
+
+            $size = $this->check_fp_size();
+            if ($size) {
+                $content = get_json_chunk($this->fp);
+
+                // We could not get the first chunk of JSON. Lets try to load everything then
+                if (! $content) {
+                    $content = fread($this->fp, $size);
+                } else {
+                    // We got the first chunk, we still need to put it into an array
+                    $content = sprintf('[%s]', $content);
+                }
+
+                $content = json_decode($content, true);
+            } else {
+                // Empty file. File was just created
+                $content = [];
+            }
+        } else {
+            // Read content of JSON file
+            $content = file_get_contents($this->file);
+            $content = json_decode($content, true);
+        }
+
+        // Check if its arrays of jSON
+        if (! is_array($content) && is_object($content)) {
+            throw new \Exception('An array of json is required: Json data enclosed with []');
+        }
+        // An invalid jSON file
+        if (! is_array($content) && ! is_object($content)) {
+            throw new \Exception('json is invalid');
+        }
+        $this->content = $content;
+        return true;
+    }
+
     private function append()
     {
         $size = $this->check_fp_size();
@@ -278,14 +424,14 @@ class JSONDB
                 if ($lstblkbrkt === false) {
                     $lstblkbrkt = strrpos($read, ']', 0);
                     if ($lstblkbrkt !== false) {
-                        $lstblkbrkt = ($i - $per_read) + $lstblkbrkt;
+                        $lstblkbrkt = $i - $per_read + $lstblkbrkt;
                     }
                 }
 
                 if ($lstblkbrkt !== false) {
                     $lastinput = strrpos($read, '}');
                     if ($lastinput !== false) {
-                        $lastinput = ($i - $per_read) + $lastinput;
+                        $lastinput = $i - $per_read + $lastinput;
                         break;
                     }
                 }
@@ -347,38 +493,6 @@ class JSONDB
     }
 
     /**
-     * Prepares data and written to file
-     *
-     * @return object $this
-     */
-    public function trigger()
-    {
-        $content = (! empty($this->where) ? $this->where_result() : $this->content);
-        $return = false;
-        if ($this->delete) {
-            if (! empty($this->last_indexes) && ! empty($this->where)) {
-                $this->content = array_filter($this->content, function ($index) {
-                    return ! in_array($index, $this->last_indexes);
-                }, ARRAY_FILTER_USE_KEY);
-
-                $this->content = array_values($this->content);
-            } elseif (empty($this->where) && empty($this->last_indexes)) {
-                $this->content = [];
-            }
-
-            $return = true;
-            $this->delete = false;
-        } elseif (! empty($this->update)) {
-            $this->_update();
-            $this->update = [];
-        } else {
-            $return = false;
-        }
-        $this->commit();
-        return $this;
-    }
-
-    /**
      * Flushes indexes they won't be reused on next action
      */
     private function flush_indexes($flush_where = false)
@@ -423,7 +537,7 @@ class JSONDB
     {
         $this->flush_indexes();
 
-        if ($this->merge == 'AND') {
+        if ($this->merge === 'AND') {
             return $this->where_and_result();
         }
         // Filter array
@@ -457,7 +571,6 @@ class JSONDB
 
         // Loop through the db rows. Ge the index and row
         foreach ($this->content as $index => $row) {
-
             // Make sure its array data type
             $row = (array) $row;
 
@@ -473,98 +586,18 @@ class JSONDB
         return $r;
     }
 
-    public function to_xml($from, $to)
-    {
-        $this->from($from);
-        if ($this->content) {
-            $element = pathinfo($from, PATHINFO_FILENAME);
-            $xml = '
-			<?xml version="1.0"?>
-				<' . $element . '>
-';
-
-            foreach ($this->content as $index => $value) {
-                $xml .= '
-				<DATA>';
-                foreach ($value as $col => $val) {
-                    $xml .= sprintf('
-					<%s>%s</%s>', $col, $val, $col);
-                }
-                $xml .= '
-				</DATA>
-				';
-            }
-            $xml .= '</' . $element . '>';
-
-            $xml = trim($xml);
-            file_put_contents($to, $xml);
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * Generates SQL from JSON
-     *
-     * @param	string	$from			JSON file to get data from
-     * @param	string	$to				Filename to write SQL into
-     * @param	bool	$create_table	If to include create table in this export
-     *
-     * @return	bool	Returns true if file was created, else false
-     */
-    public function to_mysql(string $from, string $to, bool $create_table = true): bool
-    {
-        $this->from($from); // Reads the JSON file
-        if ($this->content) {
-            $table = pathinfo($to, PATHINFO_FILENAME); // Get filename to use as table
-
-            $sql = "-- PHP-JSONDB JSON to MySQL Dump\n--\n\n";
-            if ($create_table) {
-                // Should create table, generate a CREATE TABLE statement using the column of the first row
-                $first_row = (array) $this->content[0];
-                $columns = array_map(function ($column) use ($first_row) {
-                    return sprintf("\t`%s` %s", $column, $this->_to_mysql_type(gettype($first_row[$column])));
-                }, array_keys($first_row));
-
-                $sql = sprintf("%s-- Table Structure for `%s`\n--\n\nCREATE TABLE `%s` \n(\n%s\n);\n", $sql, $table, $table, implode(",\n", $columns));
-            }
-
-            foreach ($this->content as $row) {
-                $row = (array) $row;
-                $values = array_map(function ($vv) {
-                    $vv = (is_array($vv) || is_object($vv) ? serialize($vv) : $vv);
-                    return sprintf("'%s'", addslashes((string) $vv));
-                }, array_values($row));
-
-                $cols = array_map(function ($col) {
-                    return sprintf('`%s`', $col);
-                }, array_keys($row));
-                $sql .= sprintf("INSERT INTO `%s` ( %s ) VALUES ( %s );\n", $table, implode(', ', $cols), implode(', ', $values));
-            }
-            file_put_contents($to, $sql);
-            return true;
-        }
-        return false;
-    }
-
     private function _to_mysql_type($type)
     {
-        if ($type == 'bool') {
+        if ($type === 'bool') {
             $return = 'BOOLEAN';
-        } elseif ($type == 'integer') {
+        } elseif ($type === 'integer') {
             $return = 'INT';
-        } elseif ($type == 'double') {
+        } elseif ($type === 'double') {
             $return = strtoupper($type);
         } else {
             $return = 'VARCHAR( 255 )';
         }
         return $return;
-    }
-
-    public function order_by($column, $order = self::ASC)
-    {
-        $this->order_by = [$column, $order];
-        return $this;
     }
 
     private function _process_order_by($content)
@@ -587,9 +620,9 @@ class JSONDB
             }
 
             // Let's sort!
-            if ($order_by == self::ASC) {
+            if ($order_by === self::ASC) {
                 asort($sort_keys);
-            } elseif ($order_by == self::DESC) {
+            } elseif ($order_by === self::DESC) {
                 arsort($sort_keys);
             }
 
@@ -601,36 +634,6 @@ class JSONDB
             $content = $sorted;
         }
 
-        return $content;
-    }
-
-    public function get()
-    {
-        if ($this->where != null) {
-            $content = $this->where_result();
-        } else {
-            $content = $this->content;
-        }
-
-        if ($this->select && ! in_array('*', $this->select)) {
-            $r = [];
-            foreach ($content as $id => $row) {
-                $row = (array) $row;
-                foreach ($row as $key => $val) {
-                    if (in_array($key, $this->select)) {
-                        $r[$id][$key] = $val;
-                    } else {
-                        continue;
-                    }
-                }
-            }
-            $content = $r;
-        }
-
-        // Finally, lets do sorting :)
-        $content = $this->_process_order_by($content);
-
-        $this->flush_indexes(true);
         return $content;
     }
 }
